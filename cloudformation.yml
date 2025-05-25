@@ -1,7 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Google Drive OAuth + Postmark Attachment Upload
-  2 Lambdas + API Gateway HTTP API
 
 Parameters:
   GoogleClientId:
@@ -181,6 +180,7 @@ Resources:
           import boto3
           import urllib.request
           import urllib.parse
+          import uuid
 
           secrets_client = boto3.client('secretsmanager')
 
@@ -236,12 +236,14 @@ Resources:
               body = json.loads(event.get("body", "{}"))
               attachments = body.get("Attachments", [])
 
+
+              
               for att in attachments:
                   name = att.get("Name")
                   content = base64.b64decode(att.get("Content"))
                   upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
                   metadata = {"name": name}
-                  boundary = "foo_bar_baz"
+                  boundary = f"emaildrop-{uuid.uuid4()}"
                   data = (
                       f"--{boundary}\r\n"
                       "Content-Type: application/json; charset=UTF-8\r\n\r\n"
