@@ -10,11 +10,15 @@ Parameters:
   GoogleClientSecret:
     Type: String
     Description: Google OAuth Client Secret
-  RefreshTokenSecretName:
-    Type: String
-    Description: Name for AWS Secrets Manager secret to store refresh token
 
 Resources:
+
+  ### Secrets Manager Secret ###
+  RefreshTokenSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: "EmailDropRefreshToken"
+      Description: "Google Drive OAuth refresh token"
 
   ### IAM Role for Lambdas ###
   LambdaExecutionRole:
@@ -28,22 +32,18 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
-        - PolicyName: LambdaSecretsAndLogs
+        - PolicyName: LambdaSecretsAccess
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: "*"
-              - Effect: Allow
-                Action:
                   - secretsmanager:GetSecretValue
                   - secretsmanager:PutSecretValue
-                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${RefreshTokenSecretName}*"
+                Resource: !GetAtt RefreshTokenSecret.Arn
 
   ### Lambda to handle OAuth redirect and token saving ###
   OAuthHandlerFunction:
@@ -59,7 +59,7 @@ Resources:
         Variables:
           GOOGLE_CLIENT_ID: !Ref GoogleClientId
           GOOGLE_CLIENT_SECRET: !Ref GoogleClientSecret
-          REFRESH_TOKEN_SECRET_NAME: !Ref RefreshTokenSecretName
+          REFRESH_TOKEN_SECRET_NAME: "EmailDropRefreshToken"
       Code:
         ZipFile: |
           import json
@@ -74,10 +74,10 @@ Resources:
           CLIENT_SECRET = os.environ['GOOGLE_CLIENT_SECRET']
           SECRET_NAME = os.environ['REFRESH_TOKEN_SECRET_NAME']
 
-          def get_authorize_url():
+          def get_authorize_url(redirect_uri):
               params = {
                   "client_id": CLIENT_ID,
-                  "redirect_uri": "https://{api_gateway_domain}/oauth",  # Replace dynamically later
+                  "redirect_uri": redirect_uri,
                   "response_type": "code",
                   "scope": "https://www.googleapis.com/auth/drive.file",
                   "access_type": "offline",
@@ -85,13 +85,13 @@ Resources:
               }
               return "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params)
 
-          def exchange_code_for_tokens(code):
+          def exchange_code_for_tokens(code, redirect_uri):
               token_url = "https://oauth2.googleapis.com/token"
               data = urllib.parse.urlencode({
                   "code": code,
                   "client_id": CLIENT_ID,
                   "client_secret": CLIENT_SECRET,
-                  "redirect_uri": "https://{api_gateway_domain}/oauth",  # Replace dynamically later
+                  "redirect_uri": redirect_uri,
                   "grant_type": "authorization_code"
               }).encode()
               req = urllib.request.Request(token_url, data=data, method='POST')
@@ -106,7 +106,10 @@ Resources:
               if code:
                   # Exchange code for tokens
                   try:
-                      tokens = exchange_code_for_tokens(code)
+                      api_domain = event['requestContext']['domainName']
+                      stage = event['requestContext']['stage']
+                      redirect_uri = f"https://{api_domain}/{stage}/oauth"
+                      tokens = exchange_code_for_tokens(code, redirect_uri)
                       refresh_token = tokens.get('refresh_token')
                       if not refresh_token:
                           return {
@@ -167,7 +170,7 @@ Resources:
       MemorySize: 256
       Environment:
         Variables:
-          SECRET_NAME: !Ref RefreshTokenSecretName
+          SECRET_NAME: "EmailDropRefreshToken"
           GOOGLE_CLIENT_ID: !Ref GoogleClientId
           GOOGLE_CLIENT_SECRET: !Ref GoogleClientSecret
       Code:
@@ -199,11 +202,18 @@ Resources:
                   "grant_type": "refresh_token",
               }).encode('utf-8')
 
-              req = urllib.request.Request(token_url, data=data, method='POST)
+              req = urllib.request.Request(token_url, data=data, method='POST')
               req.add_header("Content-Type", "application/x-www-form-urlencoded")
               try:
                   with urllib.request.urlopen(req) as resp:
                       token_response = json.loads(resp.read())
+                      # If a new refresh token is provided, update it in Secrets Manager
+                      if token_response.get("refresh_token"):
+                          secrets_client.put_secret_value(
+                              SecretId=os.environ["SECRET_NAME"],
+                              SecretString=json.dumps({"refresh_token": token_response.get("refresh_token")})
+                          )
+                          print("Updated refresh token in Secrets Manager")
                       return token_response.get("access_token")
               except Exception as e:
                   print("Error getting access token:", e)
@@ -258,6 +268,15 @@ Resources:
     Properties:
       Name: PostmarkGoogleDriveAPI
       ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowMethods:
+          - GET
+          - POST
+        AllowHeaders:
+          - Content-Type
+          - Authorization
 
   ### OAuth route ###
   OAuthIntegration:
@@ -316,6 +335,39 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayHttpApi}/*/POST/upload
 
+  ### CloudWatch Alarms ###
+  LambdaErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alarm if Lambda errors exceed threshold"
+      Namespace: "AWS/Lambda"
+      MetricName: "Errors"
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref UploadFunction
+      Statistic: "Sum"
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: "GreaterThanOrEqualToThreshold"
+      TreatMissingData: "notBreaching"
+
+  ApiGatewayErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alarm if API Gateway 5XX errors exceed threshold"
+      Namespace: "AWS/ApiGateway"
+      MetricName: "5XXError"
+      Dimensions:
+        - Name: ApiId
+          Value: !Ref ApiGatewayHttpApi
+      Statistic: "Sum"
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: "GreaterThanOrEqualToThreshold"
+      TreatMissingData: "notBreaching"
+
 Outputs:
 
   OAuthURL:
@@ -324,4 +376,68 @@ Outputs:
 
   PostmarkWebhookURL:
     Description: "URL to receive Postmark inbound webhook"
+    Value: !Sub "https://${ApiGatewayHttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/upload"
+    
+  RefreshTokenSecretArn:
+    Description: "ARN of the Secret storing the Google Drive refresh token"
+    Value: !Ref RefreshTokenSecret
+
+  ### Permissions ###
+  LambdaInvokePermissionOAuth:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref OAuthHandlerFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayHttpApi}/*/GET/oauth
+
+  LambdaInvokePermissionUpload:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref UploadFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayHttpApi}/*/POST/upload
+
+  ### CloudWatch Alarms ###
+  LambdaErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alarm if Lambda errors exceed threshold"
+      Namespace: "AWS/Lambda"
+      MetricName: "Errors"
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref UploadFunction
+      Statistic: "Sum"
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: "GreaterThanOrEqualToThreshold"
+      TreatMissingData: "notBreaching"
+
+  ApiGatewayErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alarm if API Gateway 5XX errors exceed threshold"
+      Namespace: "AWS/ApiGateway"
+      MetricName: "5XXError"
+      Dimensions:
+        - Name: ApiId
+          Value: !Ref ApiGatewayHttpApi
+      Statistic: "Sum"
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: "GreaterThanOrEqualToThreshold"
+      TreatMissingData: "notBreaching"
+
+Outputs:
+
+  OAuthURL:
+    Description: "Step 1: URL to start Google Drive authorization (copy and paste in your browser)"
+    Value: !Sub "https://${ApiGatewayHttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/oauth"
+
+  PostmarkWebhookURL:
+    Description: "Step 2: URL to paste into Postmark as the inbound webhook:"
     Value: !Sub "https://${ApiGatewayHttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/upload"
