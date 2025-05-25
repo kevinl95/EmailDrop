@@ -48,7 +48,7 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                   - secretsmanager:PutSecretValue
-                Resource: !GetAtt RefreshTokenSecret.Arn
+                Resource: !Ref RefreshTokenSecret
 
   ### Lambda to handle OAuth redirect and token saving ###
   OAuthHandlerFunction:
