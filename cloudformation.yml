@@ -1,0 +1,327 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Google Drive OAuth + Postmark Attachment Upload
+  2 Lambdas + API Gateway HTTP API
+
+Parameters:
+  GoogleClientId:
+    Type: String
+    Description: Google OAuth Client ID
+  GoogleClientSecret:
+    Type: String
+    Description: Google OAuth Client Secret
+  RefreshTokenSecretName:
+    Type: String
+    Description: Name for AWS Secrets Manager secret to store refresh token
+
+Resources:
+
+  ### IAM Role for Lambdas ###
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: LambdaSecretsAndLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:PutSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${RefreshTokenSecretName}*"
+
+  ### Lambda to handle OAuth redirect and token saving ###
+  OAuthHandlerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: GoogleDriveOAuthHandler
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 15
+      MemorySize: 128
+      Environment:
+        Variables:
+          GOOGLE_CLIENT_ID: !Ref GoogleClientId
+          GOOGLE_CLIENT_SECRET: !Ref GoogleClientSecret
+          REFRESH_TOKEN_SECRET_NAME: !Ref RefreshTokenSecretName
+      Code:
+        ZipFile: |
+          import json
+          import urllib.parse
+          import urllib.request
+          import boto3
+          import os
+
+          secrets_client = boto3.client('secretsmanager')
+
+          CLIENT_ID = os.environ['GOOGLE_CLIENT_ID']
+          CLIENT_SECRET = os.environ['GOOGLE_CLIENT_SECRET']
+          SECRET_NAME = os.environ['REFRESH_TOKEN_SECRET_NAME']
+
+          def get_authorize_url():
+              params = {
+                  "client_id": CLIENT_ID,
+                  "redirect_uri": "https://{api_gateway_domain}/oauth",  # Replace dynamically later
+                  "response_type": "code",
+                  "scope": "https://www.googleapis.com/auth/drive.file",
+                  "access_type": "offline",
+                  "prompt": "consent"
+              }
+              return "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params)
+
+          def exchange_code_for_tokens(code):
+              token_url = "https://oauth2.googleapis.com/token"
+              data = urllib.parse.urlencode({
+                  "code": code,
+                  "client_id": CLIENT_ID,
+                  "client_secret": CLIENT_SECRET,
+                  "redirect_uri": "https://{api_gateway_domain}/oauth",  # Replace dynamically later
+                  "grant_type": "authorization_code"
+              }).encode()
+              req = urllib.request.Request(token_url, data=data, method='POST')
+              req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+              with urllib.request.urlopen(req) as resp:
+                  return json.load(resp)
+
+          def handler(event, context):
+              # Extract query string parameters
+              qs = event.get('queryStringParameters') or {}
+              code = qs.get('code')
+              if code:
+                  # Exchange code for tokens
+                  try:
+                      tokens = exchange_code_for_tokens(code)
+                      refresh_token = tokens.get('refresh_token')
+                      if not refresh_token:
+                          return {
+                              "statusCode": 400,
+                              "body": "No refresh token received. Make sure to consent to offline access."
+                          }
+                      # Save refresh token securely in Secrets Manager
+                      secrets_client.put_secret_value(
+                          SecretId=SECRET_NAME,
+                          SecretString=json.dumps({"refresh_token": refresh_token})
+                      )
+                      return {
+                          "statusCode": 200,
+                          "body": "Refresh token saved successfully. You can close this page."
+                      }
+                  except Exception as e:
+                      return {
+                          "statusCode": 500,
+                          "body": f"Error exchanging code: {e}"
+                      }
+              else:
+                  # No code param - return an HTML page with auth link
+                  api_domain = event['requestContext']['domainName']
+                  stage = event['requestContext']['stage']
+                  redirect_uri = f"https://{api_domain}/{stage}/oauth"
+                  auth_url = (
+                      "https://accounts.google.com/o/oauth2/v2/auth?"
+                      + urllib.parse.urlencode({
+                          "client_id": CLIENT_ID,
+                          "redirect_uri": redirect_uri,
+                          "response_type": "code",
+                          "scope": "https://www.googleapis.com/auth/drive.file",
+                          "access_type": "offline",
+                          "prompt": "consent"
+                      })
+                  )
+                  html = f"""
+                  <html><body>
+                  <h1>Authorize Google Drive Access</h1>
+                  <p><a href="{auth_url}" target="_blank">Click here to authorize access to your Google Drive</a></p>
+                  </body></html>
+                  """
+                  return {
+                      "statusCode": 200,
+                      "headers": {"Content-Type": "text/html"},
+                      "body": html
+                  }
+
+  ### Lambda to handle Postmark webhook and upload attachments ###
+  UploadFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: PostmarkAttachmentUploader
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 20
+      MemorySize: 256
+      Environment:
+        Variables:
+          SECRET_NAME: !Ref RefreshTokenSecretName
+          GOOGLE_CLIENT_ID: !Ref GoogleClientId
+          GOOGLE_CLIENT_SECRET: !Ref GoogleClientSecret
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import base64
+          import boto3
+          import urllib.request
+          import urllib.parse
+
+          secrets_client = boto3.client('secretsmanager')
+
+          def get_refresh_token(secret_name):
+              try:
+                  secret_response = secrets_client.get_secret_value(SecretId=secret_name)
+                  secret = json.loads(secret_response['SecretString'])
+                  return secret.get('refresh_token')
+              except Exception as e:
+                  print("Error retrieving refresh token:", e)
+                  return None
+
+          def get_access_token(client_id, client_secret, refresh_token):
+              token_url = "https://oauth2.googleapis.com/token"
+              data = urllib.parse.urlencode({
+                  "client_id": client_id,
+                  "client_secret": client_secret,
+                  "refresh_token": refresh_token,
+                  "grant_type": "refresh_token",
+              }).encode('utf-8')
+
+              req = urllib.request.Request(token_url, data=data, method='POST)
+              req.add_header("Content-Type", "application/x-www-form-urlencoded")
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      token_response = json.loads(resp.read())
+                      return token_response.get("access_token")
+              except Exception as e:
+                  print("Error getting access token:", e)
+                  return None
+
+          def handler(event, context):
+              secret_name = os.environ["SECRET_NAME"]
+              refresh_token = get_refresh_token(secret_name)
+              if not refresh_token:
+                  print("No refresh token available. Cannot upload files.")
+                  return {"statusCode": 500, "body": "Refresh token missing"}
+
+              client_id = os.environ["GOOGLE_CLIENT_ID"]
+              client_secret = os.environ["GOOGLE_CLIENT_SECRET"]
+              access_token = get_access_token(client_id, client_secret, refresh_token)
+              if not access_token:
+                  print("Failed to get access token")
+                  return {"statusCode": 500, "body": "Access token retrieval failed"}
+
+              body = json.loads(event.get("body", "{}"))
+              attachments = body.get("Attachments", [])
+
+              for att in attachments:
+                  name = att.get("Name")
+                  content = base64.b64decode(att.get("Content"))
+                  upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
+                  metadata = {"name": name}
+                  boundary = "foo_bar_baz"
+                  data = (
+                      f"--{boundary}\r\n"
+                      "Content-Type: application/json; charset=UTF-8\r\n\r\n"
+                      f"{json.dumps(metadata)}\r\n"
+                      f"--{boundary}\r\n"
+                      f"Content-Type: {att.get('ContentType')}\r\n\r\n"
+                  ).encode("utf-8") + content + f"\r\n--{boundary}--".encode("utf-8")
+
+                  req = urllib.request.Request(upload_url, data=data)
+                  req.add_header("Authorization", f"Bearer {access_token}")
+                  req.add_header("Content-Type", f"multipart/related; boundary={boundary}")
+
+                  try:
+                      with urllib.request.urlopen(req) as res:
+                          print(f"Uploaded {name}:", res.read().decode())
+                  except Exception as e:
+                      print(f"Failed to upload {name}:", e)
+
+              return {"statusCode": 200, "body": "Upload complete"}
+
+  ### API Gateway HTTP API ###
+  ApiGatewayHttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: PostmarkGoogleDriveAPI
+      ProtocolType: HTTP
+
+  ### OAuth route ###
+  OAuthIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGatewayHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OAuthHandlerFunction.Arn}/invocations
+      PayloadFormatVersion: "2.0"
+
+  OAuthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGatewayHttpApi
+      RouteKey: GET /oauth
+      Target: !Sub integrations/${OAuthIntegration}
+
+  ### Upload route ###
+  UploadIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGatewayHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${UploadFunction.Arn}/invocations
+      PayloadFormatVersion: "2.0"
+
+  UploadRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGatewayHttpApi
+      RouteKey: POST /upload
+      Target: !Sub integrations/${UploadIntegration}
+
+  ### Stage ###
+  ApiGatewayStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref ApiGatewayHttpApi
+      AutoDeploy: true
+      StageName: prod
+
+  ### Permissions ###
+  LambdaInvokePermissionOAuth:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref OAuthHandlerFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayHttpApi}/*/GET/oauth
+
+  LambdaInvokePermissionUpload:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref UploadFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayHttpApi}/*/POST/upload
+
+Outputs:
+
+  OAuthURL:
+    Description: "URL to start OAuth authorization (copy and paste in browser)"
+    Value: !Sub "https://${ApiGatewayHttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/oauth"
+
+  PostmarkWebhookURL:
+    Description: "URL to receive Postmark inbound webhook"
+    Value: !Sub "https://${ApiGatewayHttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/upload"
