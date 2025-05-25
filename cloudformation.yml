@@ -9,6 +9,12 @@ Parameters:
   GoogleClientSecret:
     Type: String
     Description: Google OAuth Client Secret
+  GoogleDriveFolder:
+    Type: String
+    Description: Google Drive folder name for uploaded attachments
+    Default: "Email Attachments"
+    AllowedPattern: "[a-zA-Z0-9_\\- ]+"
+    ConstraintDescription: "Folder name can only contain letters, numbers, spaces, underscores, and hyphens"
 
 Resources:
 
@@ -172,6 +178,7 @@ Resources:
           SECRET_NAME: "EmailDropRefreshToken"
           GOOGLE_CLIENT_ID: !Ref GoogleClientId
           GOOGLE_CLIENT_SECRET: !Ref GoogleClientSecret
+          GOOGLE_DRIVE_FOLDER: !Ref GoogleDriveFolder
       Code:
         ZipFile: |
           import json
@@ -238,11 +245,59 @@ Resources:
 
 
               
+              # Get or create the target folder
+              folder_name = os.environ.get("GOOGLE_DRIVE_FOLDER", "Email Attachments")
+              folder_id = None
+              
+              # Check if folder exists
+              search_url = "https://www.googleapis.com/drive/v3/files"
+              query_params = {
+                  "q": f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+                  "spaces": "drive",
+                  "fields": "files(id,name)"
+              }
+              search_url = f"{search_url}?{urllib.parse.urlencode(query_params)}"
+              
+              req = urllib.request.Request(search_url)
+              req.add_header("Authorization", f"Bearer {access_token}")
+              
+              try:
+                  with urllib.request.urlopen(req) as res:
+                      search_result = json.loads(res.read().decode())
+                      files = search_result.get("files", [])
+                      if files:
+                          folder_id = files[0]["id"]
+                          print(f"Found existing folder: {folder_name} with ID: {folder_id}")
+                      else:
+                          # Create folder
+                          create_url = "https://www.googleapis.com/drive/v3/files"
+                          folder_metadata = {
+                              "name": folder_name,
+                              "mimeType": "application/vnd.google-apps.folder"
+                          }
+                          
+                          req = urllib.request.Request(create_url, data=json.dumps(folder_metadata).encode('utf-8'))
+                          req.add_header("Authorization", f"Bearer {access_token}")
+                          req.add_header("Content-Type", "application/json")
+                          
+                          with urllib.request.urlopen(req) as res:
+                              folder_result = json.loads(res.read().decode())
+                              folder_id = folder_result.get("id")
+                              print(f"Created new folder: {folder_name} with ID: {folder_id}")
+              except Exception as e:
+                  print(f"Error finding/creating folder: {e}")
+              
+              # Upload files to the folder
               for att in attachments:
                   name = att.get("Name")
                   content = base64.b64decode(att.get("Content"))
                   upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
+                  
+                  # Include folder as parent if we have a folder ID
                   metadata = {"name": name}
+                  if folder_id:
+                      metadata["parents"] = [folder_id]
+                      
                   boundary = f"emaildrop-{uuid.uuid4()}"
                   data = (
                       f"--{boundary}\r\n"
@@ -373,73 +428,9 @@ Resources:
 Outputs:
 
   OAuthURL:
-    Description: "URL to start OAuth authorization (copy and paste in browser)"
+    Description: "Step 1: URL to start Google Drive authorization (copy and paste in browser)"
     Value: !Sub "https://${ApiGatewayHttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/oauth"
 
   PostmarkWebhookURL:
-    Description: "URL to receive Postmark inbound webhook"
-    Value: !Sub "https://${ApiGatewayHttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/upload"
-    
-  RefreshTokenSecretArn:
-    Description: "ARN of the Secret storing the Google Drive refresh token"
-    Value: !Ref RefreshTokenSecret
-
-  ### Permissions ###
-  LambdaInvokePermissionOAuth:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref OAuthHandlerFunction
-      Action: lambda:InvokeFunction
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayHttpApi}/*/GET/oauth
-
-  LambdaInvokePermissionUpload:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref UploadFunction
-      Action: lambda:InvokeFunction
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayHttpApi}/*/POST/upload
-
-  ### CloudWatch Alarms ###
-  LambdaErrorsAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmDescription: "Alarm if Lambda errors exceed threshold"
-      Namespace: "AWS/Lambda"
-      MetricName: "Errors"
-      Dimensions:
-        - Name: FunctionName
-          Value: !Ref UploadFunction
-      Statistic: "Sum"
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 1
-      ComparisonOperator: "GreaterThanOrEqualToThreshold"
-      TreatMissingData: "notBreaching"
-
-  ApiGatewayErrorsAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmDescription: "Alarm if API Gateway 5XX errors exceed threshold"
-      Namespace: "AWS/ApiGateway"
-      MetricName: "5XXError"
-      Dimensions:
-        - Name: ApiId
-          Value: !Ref ApiGatewayHttpApi
-      Statistic: "Sum"
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 1
-      ComparisonOperator: "GreaterThanOrEqualToThreshold"
-      TreatMissingData: "notBreaching"
-
-Outputs:
-
-  OAuthURL:
-    Description: "Step 1: URL to start Google Drive authorization (copy and paste in your browser)"
-    Value: !Sub "https://${ApiGatewayHttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/oauth"
-
-  PostmarkWebhookURL:
-    Description: "Step 2: URL to paste into Postmark as the inbound webhook:"
+    Description: "Step 2: URL to paste into Postmark as the inbound webhook"
     Value: !Sub "https://${ApiGatewayHttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/upload"
