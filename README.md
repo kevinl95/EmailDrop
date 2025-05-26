@@ -10,8 +10,6 @@ This application automatically uploads email attachments from Postmark to Google
 - **Secrets Manager**: Securely stores OAuth refresh tokens
 - **Google Drive API**: Destination for email attachments
 
-![Flow Diagram: Email → Postmark → AWS Lambda → Google Drive]
-
 ## Setup Instructions
 
 ### 1. Google Drive API Setup
