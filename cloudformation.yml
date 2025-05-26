@@ -15,6 +15,12 @@ Parameters:
     Default: "Email Attachments"
     AllowedPattern: "[a-zA-Z0-9_\\- ]+"
     ConstraintDescription: "Folder name can only contain letters, numbers, spaces, underscores, and hyphens"
+  LambdaTimeout:
+    Type: Number
+    Description: Timeout in seconds for the upload Lambda function
+    Default: 60
+    MinValue: 30
+    MaxValue: 900
 
 Resources:
 
@@ -171,8 +177,8 @@ Resources:
       Runtime: python3.9
       Handler: index.handler
       Role: !GetAtt LambdaExecutionRole.Arn
-      Timeout: 20
-      MemorySize: 256
+      Timeout: !Ref LambdaTimeout
+      MemorySize: 512
       Environment:
         Variables:
           SECRET_NAME: "EmailDropRefreshToken"
