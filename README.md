@@ -1,20 +1,23 @@
 # EmailDrop: Postmark to Google Drive Attachment Uploader
 
-This application automatically uploads email attachments from Postmark to Google Drive. It uses AWS Lambda, API Gateway, and Secrets Manager to handle the OAuth flow and file uploads.
+This application automatically uploads email attachments from Postmark to Google Drive. When emails are sent to your Postmark inbound email address, any attachments are automatically saved to your specified Google Drive folder. The system uses AWS Lambda, API Gateway, and Secrets Manager to handle the OAuth flow and file uploads.
 
 ## Architecture
 
+- **Postmark**: Receives emails and sends attachment data via webhooks
 - **API Gateway**: Provides endpoints for OAuth callback and Postmark webhook
 - **Lambda Functions**: Handle OAuth flow and attachment uploads
 - **Secrets Manager**: Securely stores OAuth refresh tokens
 - **Google Drive API**: Destination for email attachments
+
+![Flow Diagram: Email → Postmark → AWS Lambda → Google Drive]
 
 ## Setup Instructions
 
 ### 1. Google Drive API Setup
 
 #### 1.1 Go to Google Cloud Console
-- Visit https://console.cloud.google.com/
+- Visit [https://console.cloud.google.com/](https://console.cloud.google.com/)
 
 #### 1.2 Create a Project
 - Click the project dropdown → New Project
@@ -22,23 +25,23 @@ This application automatically uploads email attachments from Postmark to Google
 - Click Create
 
 #### 1.3 Enable the Google Drive API
-- Go to APIs & Services → Library
+- Go to **APIs & Services** → **Library**
 - Search for Google Drive API
 - Click Enable
 
 #### 1.4 Configure the OAuth Consent Screen
-- Go to APIs & Services → OAuth consent screen
+- Go to **APIs & Services** → **OAuth consent screen**
 - Choose External
 - Fill in:
   - App name
   - Support email
-  - Developer contact email
-- Add yourself as a test user
+  - Developer contact email (these can all be your personal email)
+- Add yourself as a test user using the **Audience** page on the sidebar
 - Click Save and Continue
 
 #### 1.5 Create OAuth 2.0 Credentials
-- Go to APIs & Services → Credentials
-- Click + Create Credentials → OAuth client ID
+- Go to **APIs & Services** → **Credentials**
+- Click **Create Credentials** → **OAuth client ID**
 - Choose Web application
 - Skip the redirect URI for now — you'll add it after deploying the stack
 - Click Create
@@ -70,9 +73,26 @@ This application automatically uploads email attachments from Postmark to Google
 - The Lambda will exchange the code for tokens and store them
 
 ### 4. Configure Postmark
-- In the stack outputs, find the PostmarkWebhookURL
-- Configure your Postmark server to send inbound webhooks to this URL
-- Any attachments in emails received by Postmark will now be uploaded to your Google Drive
+
+#### 4.1 Create a Postmark Account
+- Sign up at [postmarkapp.com](https://postmarkapp.com)
+- Create a new server (or use an existing one)
+
+#### 4.2 Set Up Inbound Email Processing
+- In your Postmark dashboard, navigate to **Servers** → **Your Server Name** → **Default Inbound Stream**
+- Navigate to **Setup Instructions**
+- Note your unique inbound email address
+
+#### 4.3 Configure Webhook URL
+- From the **Setup Instructions** page, find the **Webhook URL** field
+- In the CloudFormation stack outputs, find the **PostmarkWebhookURL** value
+- Copy this URL and paste it into the Postmark Webhook URL field
+- Save your changes
+
+#### 4.4 Test the Integration
+- Send an email with attachments to your Postmark inbound email address
+- The attachments should be automatically uploaded to your Google Drive folder
+- Check the Lambda logs in CloudWatch if you encounter any issues
 
 ## Customization Options
 
@@ -85,9 +105,4 @@ If attachments aren't being uploaded:
 1. Check CloudWatch Logs for the Lambda functions
 2. Verify the OAuth flow was completed successfully
 3. Ensure Postmark is correctly configured to send webhooks
-
-## Security Considerations
-
-- The application uses AWS Secrets Manager to securely store OAuth tokens
-- Only minimal Google Drive permissions are requested (drive.file)
-- Consider adding additional security measures for production use
+4. Test your Postmark inbound email by sending a test email with attachments
