@@ -1,5 +1,7 @@
 # EmailDrop: Postmark to Google Drive Attachment Uploader
 
+[![Lint CloudFormation Template](https://github.com/kevinl95/EmailDrop/actions/workflows/main.yml/badge.svg)](https://github.com/kevinl95/EmailDrop/actions/workflows/main.yml)
+
 This application automatically uploads email attachments from Postmark to Google Drive. When emails are sent to your Postmark inbound email address, any attachments are automatically saved to your specified Google Drive folder. The system uses AWS Lambda, API Gateway, and Secrets Manager to handle the OAuth flow and file uploads.
 
 ## Architecture
