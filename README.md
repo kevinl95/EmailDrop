@@ -72,8 +72,11 @@ This application automatically uploads email attachments from Postmark to Google
 ### 3. Complete the OAuth Flow
 - In the stack outputs, find the OAuthURL
 - Open it in your browser
+- Click the link on your screen to begin authenticating with Google Drive.
+- You will get a warning that Google has not verified this application. Click 'Continue'
 - Approve access to Google Drive
 - The Lambda will exchange the code for tokens and store them
+- You can now close this page.
 
 ### 4. Configure Postmark
 
@@ -87,9 +90,10 @@ This application automatically uploads email attachments from Postmark to Google
 - Note your unique inbound email address
 
 #### 4.3 Configure Webhook URL
-- From the **Setup Instructions** page, find the **Webhook URL** field
+- From the **Settings** page, find the **Webhook URL** field
 - In the CloudFormation stack outputs, find the **PostmarkWebhookURL** value
 - Copy this URL and paste it into the Postmark Webhook URL field
+- Check the box below this field that will send the JSON payload to your Lambda function. EmailDrop parses this JSON to extract the attachments.
 - Save your changes
 
 #### 4.4 Test the Integration
