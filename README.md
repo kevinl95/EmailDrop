@@ -50,7 +50,8 @@ This application automatically uploads email attachments from Postmark to Google
 ### 2. Deploy the CloudFormation Stack
 
 #### 2.1 Launch the Stack
-- Upload the `cloudformation.yml` file to CloudFormation
+[![Launch Stack](https://d1.awsstatic.com/cloudformation/assets/button-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?templateURL=https://emaildroppostmark.s3.us-west-2.amazonaws.com/cloudformation.yml)
+- Click the Launch Stack button
 - Fill in the parameters:
   - **GoogleClientId**: (from step 1.5)
   - **GoogleClientSecret**: (from step 1.5)
