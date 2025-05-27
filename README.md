@@ -62,8 +62,8 @@ This application automatically uploads email attachments from Postmark to Google
 
 #### 2.2 Add the Redirect URI
 - Once the stack is deployed, go to the Outputs tab in CloudFormation
-- Copy the PostmarkWebhookURL output
-- Return to Google Cloud Console → Credentials
+- Copy the OAuthURL output
+- Return to Google Cloud Console → Client
 - Click on your OAuth 2.0 client
 - Edit the Authorized redirect URIs
 - Paste in the URL you copied from the stack output
